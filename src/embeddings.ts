@@ -15,10 +15,18 @@ function getClient(): OpenAI {
   return client;
 }
 
-export async function generateEmbeddings(text: string): Promise<number[]> {
+export async function generateEmbedding(text: string): Promise<number[]> {
   const response = await getClient().embeddings.create({
     model: EMBEDDING_MODEL,
     input: text,
   });
   return response.data[0].embedding;
+}
+
+export async function generateEmbeddings(texts: string[]): Promise<number[][]> {
+  const response = await getClient().embeddings.create({
+    model: EMBEDDING_MODEL,
+    input: texts,
+  });
+  return response.data.map((d) => d.embedding);
 }
