@@ -2,8 +2,8 @@ import OpenAI from "openai";
 
 let client: OpenAI | null = null;
 
-const EMBEDDING_MODEL = "mistralai/mistral-embed";
-const EMBEDDING_DIMENSIONS = 1024;
+const EMBEDDING_MODEL = "openai/text-embedding-3-small";
+const EMBEDDING_DIMENSIONS = 1536;
 
 function getClient(): OpenAI {
   if (!client) {
