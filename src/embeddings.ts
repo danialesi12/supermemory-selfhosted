@@ -15,7 +15,7 @@ function getClient(): OpenAI {
   return client;
 }
 
-export async function generateEmbedding(text: string): Promise<number[]> {
+export async function generateEmbeddings(text: string): Promise<number[]> {
   const response = await getClient().embeddings.create({
     model: EMBEDDING_MODEL,
     input: text,
