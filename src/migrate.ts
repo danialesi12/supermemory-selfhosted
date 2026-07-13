@@ -22,7 +22,7 @@ async function migrate() {
   await query(`
     CREATE INDEX IF NOT EXISTS idx_documents_embedding
     ON documents USING ivfflat (embedding vector_cosine_ops)
-    WITH (lists = 100)
+    WITH (lists = 1)
   `);
 
   await query(`
@@ -33,6 +33,17 @@ async function migrate() {
   await query(`
     CREATE INDEX IF NOT EXISTS idx_documents_created_at
     ON documents (created_at DESC)
+  `);
+
+  await query(`
+    ALTER TABLE documents
+    ADD COLUMN IF NOT EXISTS fts tsvector
+    GENERATED ALWAYS AS (to_tsvector('simple', content)) STORED
+  `);
+
+  await query(`
+    CREATE INDEX IF NOT EXISTS idx_documents_fts
+    ON documents USING GIN(fts)
   `);
 
   await query(`

@@ -1,6 +1,24 @@
-# supermemory (self-hosted)
+# supermemory (self-hosted) — OpenRouter fork
 
-A self-hosted, API-compatible reimplementation of [Supermemory](https://supermemory.ai) — a memory layer for AI applications. Store documents, embed them automatically, and search by semantic similarity. Runs entirely in Docker, optionally behind Tailscale so nothing is exposed to the public internet.
+A self-hosted, API-compatible reimplementation of [Supermemory](https://supermemory.ai) — a memory layer for AI applications. Store documents, embed them automatically, and search by semantic similarity. Runs entirely in Docker.
+
+> **Fork di [s11ngh/supermemory-selfhosted](https://github.com/s11ngh/supermemory-selfhosted)**  
+> Modificato per usare **OpenRouter** come provider di embedding al posto di Novita AI.
+
+## Modifiche rispetto all'originale
+
+| Cosa | Originale | Questo fork |
+|------|-----------|-------------|
+| Provider embedding | Novita AI | OpenRouter |
+| Modello | `qwen/qwen3-embedding-8b` | `mistralai/mistral-embed` |
+| Dimensioni vettore | 1536 | 1024 |
+| Variabile d'ambiente | `NOVITA_API_KEY` | `OPENROUTER_API_KEY` |
+
+> ⚠️ Se migri dalla versione originale devi droppare e ricreare la tabella `documents` perché le dimensioni dell'embedding sono cambiate:
+> ```bash
+> docker exec -it db-<id> psql -U supermemory -c "DROP TABLE IF EXISTS documents CASCADE;"
+> ```
+> Le migrazioni ricrееranno la tabella automaticamente al riavvio.
 
 ## Why self-host?
 
@@ -14,47 +32,19 @@ This project reimplements the `/v3` and `/v4` API endpoints from scratch, revers
 |-----------|------|
 | [Hono](https://hono.dev) | HTTP framework (Node.js) |
 | [Postgres 17](https://www.postgresql.org/) + [pgvector](https://github.com/pgvector/pgvector) | Document storage and vector search |
-| [Novita AI](https://novita.ai) | Embedding generation (`qwen/qwen3-embedding-8b`, swappable) |
-| [Tailscale](https://tailscale.com) | Optional private networking (tailnet-only access) |
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────┐
-│  Docker Compose                                     │
-│                                                     │
-│  ┌───────────┐    shared network    ┌────────────┐  │
-│  │ tailscale │◄────────────────────►│    api     │  │
-│  │ (optional)│     (port 8787)      │   :8787    │  │
-│  └───────────┘                      └─────┬──────┘  │
-│   100.x.x.x                              │         │
-│   (tailnet only)                          │         │
-│                                      ┌────▼──────┐  │
-│                                      │  postgres  │  │
-│                                      │  pgvector  │  │
-│                                      └───────────┘  │
-│                                       (internal)    │
-└─────────────────────────────────────────────────────┘
-```
-
-With Tailscale enabled, the API container shares the Tailscale container's network stack (`network_mode: service:tailscale`). Port 8787 is reachable **only** via the Tailscale IP — not on localhost, not on LAN. Postgres is internal to the Docker network with no exposed ports.
-
-Without Tailscale, you can expose port 8787 directly (see [Running without Tailscale](#running-without-tailscale)).
-
----
+| [OpenRouter](https://openrouter.ai) | Embedding generation (`mistralai/mistral-embed`) |
 
 ## Getting started
 
 ### Prerequisites
 
 - Docker and Docker Compose
-- A [Tailscale auth key](https://login.tailscale.com/admin/settings/keys) (reusable recommended) — skip if not using Tailscale
-- A [Novita AI](https://novita.ai) API key (free tier available), or any OpenAI-compatible embedding provider
+- Un account [OpenRouter](https://openrouter.ai) con API key
 
 ### 1. Clone and configure
 
 ```bash
-git clone https://github.com/s11ngh/supermemory-selfhosted.git
+git clone https://github.com/TUO_USERNAME/supermemory-selfhosted.git
 cd supermemory-selfhosted
 cp .env.example .env
 ```
@@ -62,36 +52,62 @@ cp .env.example .env
 Edit `.env` with your keys:
 
 ```env
-TS_AUTHKEY=tskey-auth-XXXXX          # Tailscale auth key
-NOVITA_API_KEY=sk_XXXXX              # Novita AI API key
+OPENROUTER_API_KEY=sk-or-XXXXX       # OpenRouter API key
 SUPERMEMORY_API_KEY=                  # Optional: require Bearer token auth
 ```
 
-### 2. Start
+### 2. Start (senza Tailscale, con Traefik/Coolify)
 
-```bash
-docker compose up -d
+```yaml
+services:
+  supermemory-api:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://supermemory:supermemory@db:5432/supermemory
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - SUPERMEMORY_API_KEY=${SUPERMEMORY_API_KEY}
+      - PORT=8787
+    restart: unless-stopped
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.supermemory.rule=Host(`supermemory.tuodominio.it`)
+      - traefik.http.routers.supermemory.entrypoints=https
+      - traefik.http.services.supermemory.loadbalancer.server.port=8787
+    networks:
+      - coolify
+      - internal
+  db:
+    image: pgvector/pgvector:pg17
+    environment:
+      - POSTGRES_USER=supermemory
+      - POSTGRES_PASSWORD=supermemory
+      - POSTGRES_DB=supermemory
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U supermemory"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - internal
+networks:
+  coolify:
+    external: true
+  internal:
+    internal: true
+volumes:
+  pgdata:
 ```
 
-First run pulls images and builds the API container (~1 min). Database migrations run automatically on every startup and are idempotent.
-
-### 3. Find your API URL
-
-**With Tailscale:**
+### 3. Verify
 
 ```bash
-docker compose exec tailscale tailscale ip -4
-# → 100.x.x.x
-```
-
-Your API is at `http://100.x.x.x:8787`.
-
-**Without Tailscale:** `http://localhost:8787` (see [Running without Tailscale](#running-without-tailscale)).
-
-### 4. Verify
-
-```bash
-curl http://<YOUR_API_URL>:8787/health
+curl https://<YOUR_DOMAIN>/health
 # → {"status":"ok","version":"1.0.0"}
 ```
 
@@ -102,48 +118,29 @@ curl http://<YOUR_API_URL>:8787/health
 ### Store a document
 
 ```bash
-curl -X POST http://<API_URL>:8787/v3/documents \
+curl -X POST https://<API_URL>/v3/documents \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <SUPERMEMORY_API_KEY>" \
   -d '{"content": "The project uses Postgres with pgvector for embeddings"}'
-```
-
-```json
-{"id": "e8920426-...", "status": "processed", "message": "Document added successfully"}
 ```
 
 ### Search by meaning
 
 ```bash
-curl -X POST http://<API_URL>:8787/v3/search \
+curl -X POST https://<API_URL>/v3/search \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <SUPERMEMORY_API_KEY>" \
   -d '{"q": "what database do we use?", "limit": 5}'
 ```
 
-```json
-{
-  "results": [
-    {
-      "id": "e8920426-...",
-      "content": "The project uses Postgres with pgvector for embeddings",
-      "score": 0.757,
-      "containerTag": "default",
-      "createdAt": "2026-02-23T23:57:11.810Z"
-    }
-  ],
-  "count": 1
-}
-```
-
 ### Use the official Supermemory SDK
-
-Since this implements the same API contract, the official SDK works out of the box:
 
 ```typescript
 import Supermemory from "supermemory";
 
 const client = new Supermemory({
-  apiKey: "your-SUPERMEMORY_API_KEY-if-set",
-  baseURL: "http://<API_URL>:8787",
+  apiKey: "your-SUPERMEMORY_API_KEY",
+  baseURL: "https://supermemory.tuodominio.it",
 });
 
 await client.add({ content: "Remember this." });
@@ -200,181 +197,12 @@ All endpoints match the supermemory SDK contract. If `SUPERMEMORY_API_KEY` is se
 
 ---
 
-## How it works
-
-### Embeddings
-
-When you add a document, the API sends its text to an OpenAI-compatible embedding endpoint (Novita AI by default, using `qwen/qwen3-embedding-8b`). The model supports up to 4096 dimensions but we request **1536** via the `dimensions` parameter ([Matryoshka representation](https://huggingface.co/blog/matryoshka)) to balance quality and storage.
-
-The resulting vector is stored alongside the document text in Postgres.
-
-### Search
-
-A search query is embedded the same way. Postgres uses the cosine distance operator (`<=>`) with an IVFFlat index to find the closest documents. Results are ranked by similarity score (0 to 1, higher = more relevant).
-
-### Database schema
-
-Migrations run on every container start (idempotent `CREATE IF NOT EXISTS`):
-
-- **`documents`** — `id` (UUID), `content`, `metadata` (JSONB), `embedding` (vector 1536), `container_tag`, `status`, timestamps
-- **`settings`** — key-value JSONB store
-- **Indexes** — IVFFlat on embeddings (cosine), B-tree on `container_tag` and `created_at`
-
-### Authentication
-
-If `SUPERMEMORY_API_KEY` is set in `.env`, all `/v3/*` and `/v4/*` endpoints require `Authorization: Bearer <key>`. The `/health` endpoint is always open. If the variable is empty, the API runs unauthenticated — fine when access is restricted to your Tailscale network.
-
----
-
 ## Swapping the embedding provider
 
-Embedding logic lives in `src/embeddings.ts`. To use a different OpenAI-compatible provider (OpenAI, Together, Ollama, etc.), change three things:
+Embedding logic lives in `src/embeddings.ts`. To use a different OpenAI-compatible provider, change model, dimensions, API key env var, and baseURL.
 
-```typescript
-// src/embeddings.ts
-const EMBEDDING_MODEL = "text-embedding-3-small";   // model name
-const EMBEDDING_DIMENSIONS = 1536;                   // must match DB column
-
-function getClient(): OpenAI {
-  if (!client) {
-    client = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,            // env var name
-      baseURL: "https://api.openai.com/v1",          // provider URL
-    });
-  }
-  return client;
-}
-```
-
-If you change the dimension count, you'll need to drop and recreate the `documents` table (or alter the `embedding` column), since pgvector dimensions are fixed per column.
-
----
-
-## Running without Tailscale
-
-Remove the `tailscale` service from `docker-compose.yml`, drop `network_mode: service:tailscale` from `supermemory-api`, and add a port mapping:
-
-```yaml
-supermemory-api:
-  build: .
-  depends_on:
-    db:
-      condition: service_healthy
-  ports:
-    - "8787:8787"
-  environment:
-    - DATABASE_URL=postgresql://supermemory:supermemory@db:5432/supermemory
-    - NOVITA_API_KEY=${NOVITA_API_KEY}
-    - SUPERMEMORY_API_KEY=${SUPERMEMORY_API_KEY:-}
-    - PORT=8787
-```
-
-The API will be available at `http://localhost:8787`. Set `SUPERMEMORY_API_KEY` if exposing beyond localhost.
-
----
-
-## Docker management
-
-```bash
-docker compose up -d                              # start
-docker compose down                               # stop
-docker compose logs -f                            # tail all logs
-docker compose logs -f supermemory-api            # tail API logs only
-docker compose up -d --build supermemory-api      # rebuild after code changes
-docker compose exec tailscale tailscale status    # check tailnet peers
-```
-
-Data persists across restarts in Docker volumes:
-- `pgdata` — Postgres data directory
-- `tailscale-state` — Tailscale node identity
-
----
-
-## OpenClaw (Clawdbot) plugin
-
-The `plugin/` directory contains an [OpenClaw](https://github.com/openclaw/openclaw) memory plugin that gives AI agents persistent memory backed by this API.
-
-### What it does
-
-- **Auto-recall** — Before each agent turn, searches memory for context relevant to the user's message and injects it
-- **Auto-capture** — After each turn, detects factual statements ("I prefer...", "we use...", "remember that...") and stores them
-- **Agent tools** — Exposes `memory_recall` and `memory_store` as tools the agent can call directly
-- **CLI commands** — `openclaw supermemory health|search|add` for manual interaction
-
-### Install
-
-```bash
-cp -r plugin/ ~/.openclaw/extensions/memory-supermemory/
-```
-
-### Configure
-
-Add to `~/.openclaw/openclaw.json`:
-
-```json
-{
-  "plugins": {
-    "memory-supermemory": {
-      "apiUrl": "http://<YOUR_API_URL>:8787",
-      "apiKey": "",
-      "autoRecall": true,
-      "autoCapture": true,
-      "recallLimit": 3,
-      "minScore": 0.55
-    },
-    "slots": {
-      "memory": "memory-supermemory"
-    }
-  }
-}
-```
-
-### Enable and verify
-
-```bash
-openclaw plugins enable memory-supermemory
-openclaw supermemory health        # → {"status":"ok","version":"1.0.0"}
-openclaw supermemory add "test"    # → {"id":"...","status":"processed",...}
-openclaw supermemory search "test" # → results with score
-```
-
-### Plugin configuration options
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `apiUrl` | string | *required* | Base URL of the supermemory API |
-| `apiKey` | string | `""` | Bearer token (leave blank if API has no auth) |
-| `autoRecall` | boolean | `true` | Search memory before each agent turn |
-| `autoCapture` | boolean | `true` | Store detected facts after each turn |
-| `recallLimit` | number | `3` | Max memories to retrieve per query |
-| `minScore` | number | `0.55` | Minimum similarity score (0-1) to include |
+If you change the dimension count, drop and recreate the `documents` table since pgvector dimensions are fixed per column.
 
 ---
 
 ## Project structure
-
-```
-.
-├── .env.example            # Template for secrets
-├── docker-compose.yml      # Three services: tailscale, api, postgres
-├── Dockerfile              # Multi-stage build (tsc → Node 22 slim)
-├── package.json
-├── tsconfig.json
-├── plugin/                 # OpenClaw memory plugin
-│   ├── openclaw.plugin.json
-│   └── index.ts
-└── src/
-    ├── index.ts            # Hono server, routing, auth middleware
-    ├── db.ts               # Postgres pool + pgvector type registration
-    ├── migrate.ts          # Schema migrations (idempotent, runs on startup)
-    ├── embeddings.ts       # Embedding client (OpenAI-compatible)
-    └── routes/
-        ├── documents.ts    # Document CRUD, batch, file upload
-        ├── search.ts       # v3 + v4 semantic search
-        ├── settings.ts     # Settings key-value store
-        └── memories.ts     # Memory delete + update
-```
-
-## License
-
-MIT
